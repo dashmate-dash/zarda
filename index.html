@@ -1125,6 +1125,9 @@ var TIERS = [
 var ROUND_MS = 25000, PER_RUN = 7;
 var EPOCH = Date.UTC(2026, 10, 11);
 var STORE_KEY = 'zarda.v2';
+// When this page was built, in seconds. build.py fills it in for the hosted page only; 0 (the artifact, a file on disk)
+// means the page never goes looking for a newer upload.
+var BUILD = 1794606278;
 
 var BY_ID = {};
 BANK.forEach(function (p) {
@@ -1301,6 +1304,7 @@ function renderHome() {
   if (!roads.home) roads.home = new Road($('homeRoute'), 'overview', false);
   roads.home.set(0, false);
   show('home');
+  checkBuild(day !== checkedDay);   // the first time the home screen is drawn for a day, make sure this is still the latest upload
 }
 
 /* ---------- game: a run of seven timed rounds, one logged answer each ---------- */
@@ -1583,8 +1587,45 @@ function setLang(lang) {
   if (curScreen === 'done' && run) renderDone(false); else renderHome();
 }
 
+// ---- picking up a new upload ----
+// A page left open keeps running the build it was loaded with, and could hand out a set of questions that has since
+// been replaced. The hosted page knows when it was built, and version.txt on the server holds the time of the latest
+// build. When the server's is newer the page reloads itself: from the home screen only, never in the middle of a run.
+var newerBuild = 0, lastBuildCheck = 0, checkedDay = 0;
+function checkBuild(force) {
+  var now = Date.now();
+  if (!BUILD || curScreen === 'play' || !window.fetch || !/^https?:$/.test(location.protocol)) return;
+  if (!force && (document.hidden || now - lastBuildCheck < 300000)) return;
+  lastBuildCheck = now;
+  checkedDay = dayNumber();
+  try {
+    fetch('version.txt', { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : ''; }).then(function (txt) {
+      var m = /^\s*(\d{9,11})\s*$/.exec(txt);
+      if (!m || +m[1] <= BUILD) return;
+      newerBuild = +m[1];
+      if (curScreen === 'home') reloadForBuild();
+    }).catch(function () { /* offline or blocked: carry on with this build */ });
+  } catch (e) { /* same */ }
+}
+// At most two tries for any one build, ten minutes apart, so a cache that lags behind can never become a reload loop.
+// Says whether a reload is on its way.
+function reloadForBuild() {
+  try {
+    var key = 'zarda.reload', now = Date.now(), g = JSON.parse(sessionStorage.getItem(key) || 'null') || {};
+    var same = g.b === newerBuild;
+    if (same && (g.n >= 2 || now - g.t < 600000)) return false;
+    sessionStorage.setItem(key, JSON.stringify({ b: newerBuild, t: now, n: same ? g.n + 1 : 1 }));
+  } catch (e) { return false; }   // nowhere to keep count: stay on this build
+  location.reload();
+  return true;
+}
+
 // A page left open on the home screen moves to the new day by itself when the player's clock passes midnight.
-function watchDay() { if (curScreen === 'home' && dayNumber() !== shownDay) renderHome(); }
+// Drawing the home screen for a new day also looks for a new upload; otherwise look every few minutes.
+function watchDay() {
+  if (curScreen === 'home' && dayNumber() !== shownDay) renderHome();
+  else checkBuild(false);
+}
 function armMidnight() {
   var now = new Date(), next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
   setTimeout(function () { watchDay(); armMidnight(); }, Math.max(1000, next - now + 300));
@@ -1593,11 +1634,16 @@ function armMidnight() {
 function start(data) {
   $('btnDaily').addEventListener('click', function () {
     var day = dayNumber(), store = loadStore(), rec = store.days && store.days[day];
-    if (rec) openStoredDaily(day, rec); else startRun('daily');
+    if (rec) openStoredDaily(day, rec);
+    else if (!(newerBuild && reloadForBuild())) startRun('daily');   // never start today's seven on a build that has been replaced
   });
   $('btnPractice').addEventListener('click', function () { startRun('practice'); });
   $('btnAgain').addEventListener('click', function () { startRun('practice'); });
-  $('btnHome').addEventListener('click', function () { clearTimeout(engineOff); Sound.stopEngine(); renderHome(); });
+  $('btnHome').addEventListener('click', function () {
+    clearTimeout(engineOff);
+    Sound.stopEngine();
+    if (!(newerBuild && reloadForBuild())) renderHome();
+  });
   $('btnNext').addEventListener('click', nextRound);
   $('btnSkip').addEventListener('click', function () { endRound('skip'); });
   $('btnShare').addEventListener('click', copyResult);
